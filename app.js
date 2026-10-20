@@ -17,6 +17,7 @@ import { buildBootpack, buildMappacks, findSafeBlackTwin, NUMCHUNKS, NUMPICS }
   from './js/assets.js';
 import { buildSfxBank } from './js/sfx.js';
 import { readManifest, paletteFromImage, patchSlots } from './js/baseimg.js';
+import { applyFpsPatch } from './js/fpspatch.js';
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
@@ -75,7 +76,9 @@ async function build() {
     log('missing: ' + missing.join(', ') + ' - all three are needed', 'err');
     return;
   }
+  const showFps = $('#show-fps').checked;
   $('#btn-build').disabled = true;
+  $('#show-fps').disabled = true;
   $('#log').innerHTML = '';
   try {
     /* --- the base image (the one that ships with the page) --- */
@@ -160,6 +163,15 @@ async function build() {
       mappacks: mappacks,
       sfx: sfx.bank,
     });
+    if (showFps) {
+      status('applying the FPS build...');
+      const patchResponse = await fetch('fps-patch.bin');
+      if (!patchResponse.ok) throw new Error('fps-patch.bin is missing next to this page');
+      const patchInfo = applyFpsPatch(image,
+        new Uint8Array(await patchResponse.arrayBuffer()));
+      log('FPS build: applied ' + patchInfo.records + ' patch record(s), ' +
+          patchInfo.bytes + ' program byte(s)');
+    }
     const crc = crc32hex(image);
     log('final image: wolf_pcfx.bin (' + image.length + ' bytes) crc32 ' + crc, 'ok');
 
@@ -207,6 +219,7 @@ async function build() {
       'Wolfenstein 3D - NEC PC-FX disc image\n' +
       '=====================================\n\n' +
       'Built with the wolf-pcfx web editor (entirely in the browser).\n\n' +
+      'FPS counter: ' + (showFps ? 'on' : 'off') + '\n\n' +
       'wolf_pcfx.bin   the data track (MODE1/2048)\n' +
       'wolf_pcfx.cue   the cue sheet\n' +
       'wolf_pcfx_t01.bin, wolf_pcfx_SONG*.bin   the CD-DA tracks\n\n' +
@@ -216,19 +229,21 @@ async function build() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'wolf_pcfx_pc-fx.zip';
+    a.download = 'wolf_pcfx_pc-fx' + (showFps ? '_fps' : '') + '.zip';
     document.body.appendChild(a);
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 60000);
-    status('done - ' + (blob.size / 1048576).toFixed(1) + ' MiB, crc32 ' + crc);
-    log('done: wolf_pcfx_pc-fx.zip (' + (blob.size / 1048576).toFixed(1) + ' MiB)', 'ok');
+    status('done' + (showFps ? ' - FPS on' : '') + ' - ' +
+           (blob.size / 1048576).toFixed(1) + ' MiB, crc32 ' + crc);
+    log('done: ' + a.download + ' (' + (blob.size / 1048576).toFixed(1) + ' MiB)', 'ok');
   } catch (err) {
     log('ERROR: ' + err.message, 'err');
     status('failed');
     console.error(err);
   } finally {
     $('#btn-build').disabled = false;
+    $('#show-fps').disabled = false;
   }
 }
 
