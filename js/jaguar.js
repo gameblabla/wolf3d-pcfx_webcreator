@@ -230,6 +230,8 @@ export function buildHudSheet(rom, sheetSize = [199, 376]) {
 const FACE_ROWS = [[77, 108], [110, 141], [143, 174], [176, 207],
                    [209, 240], [242, 273], [275, 306], [308, 339]];
 const FACE_COLS = [[1, 25], [30, 60], [65, 94], [99, 124], [134, 157]];
+// Match the PC-FX crop correction: the gap at row 358 keeps the lower row's
+// first pixel out of digit 3 (the stray underline seen below the ammo count).
 const DIGIT_ROW_A = [341, 358];
 const DIGIT_ROW_B = [358, 376];
 const DIGIT_COLS_A = [[30, 46], [48, 62], [64, 79], [80, 95], [98, 114]];
@@ -296,6 +298,49 @@ function bbox(px, x0, x1, y0, y1, alphaKeyed) {
   }
   if (maxx < 0) return null;
   return [minx, miny, maxx + 1, maxy + 1];
+}
+
+function lanczos(x) {
+  if (Math.abs(x) >= 3) return 0;
+  if (Math.abs(x) < 1e-7) return 1;
+  const p = Math.PI * x;
+  return (Math.sin(p) / p) * (Math.sin(p / 3) / (p / 3));
+}
+
+/* Pillow's LANCZOS filter is used by the native PC-FX HUD baker. The browser
+ * derives the corrected icon from the supplied ROM, without shipping art. */
+function resizeLanczosRgba(sheet, box, dstW, dstH) {
+  const [x0, y0, x1, y1] = box;
+  const srcW = x1 - x0, srcH = y1 - y0;
+  const xScale = srcW / dstW, yScale = srcH / dstH;
+  const xFilterScale = Math.max(1, xScale), yFilterScale = Math.max(1, yScale);
+  const out = new Uint8Array(dstW * dstH * 4);
+  for (let y = 0; y < dstH; y++) {
+    const cy = (y + 0.5) * yScale - 0.5;
+    const firstY = Math.max(0, Math.ceil(cy - 3 * yFilterScale));
+    const lastY = Math.min(srcH - 1, Math.floor(cy + 3 * yFilterScale));
+    for (let x = 0; x < dstW; x++) {
+      const cx = (x + 0.5) * xScale - 0.5;
+      const firstX = Math.max(0, Math.ceil(cx - 3 * xFilterScale));
+      const lastX = Math.min(srcW - 1, Math.floor(cx + 3 * xFilterScale));
+      const sums = [0, 0, 0, 0];
+      let total = 0;
+      for (let sy = firstY; sy <= lastY; sy++) {
+        const wy = lanczos((sy - cy) / yFilterScale);
+        for (let sx = firstX; sx <= lastX; sx++) {
+          const weight = wy * lanczos((sx - cx) / xFilterScale);
+          if (weight === 0) continue;
+          total += weight;
+          const from = ((y0 + sy) * sheet.width + x0 + sx) * 4;
+          for (let c = 0; c < 4; c++) sums[c] += sheet.rgba[from + c] * weight;
+        }
+      }
+      const to = (y * dstW + x) * 4;
+      for (let c = 0; c < 4; c++)
+        out[to + c] = Math.max(0, Math.min(255, Math.round(sums[c] / total)));
+    }
+  }
+  return out;
 }
 
 /* Cut the artwork in `box`, quantise it and centre it in a canvas, then
@@ -378,22 +423,16 @@ export function buildHudOverrides(sheet, pal) {
   }
   // the blank digit
   ov[CHUNK.N_BLANKPIC] = { w: DIGIT_W * 2, h: DIGIT_H, px: new Uint8Array(DIGIT_W * 2 * DIGIT_H) };
-  // the ammo bullet icon (repurposes the never-drawn GUNPIC chunk): the
-  // cartridge that sits at the top of the sheet, scaled up for the HUD tile.
-  // The port's own Python build scales the same pixels with PIL's LANCZOS;
-  // this one keeps them as they are (nearest neighbour), which needs no
-  // image library and does not depend on the Pillow version in use.
+  // The ammo cartridge from the top of the Jaguar HUD sheet, enlarged with
+  // the same Lanczos filter as the native PC-FX asset baker.
   {
-    const [ax, ay, bx, by] = AMMO_ICON_BOX;
     const cw = AMMO_ICON_W, ch = AMMO_ICON_H;
     const idx = new Uint8Array(cw * ch);
+    const scaled = resizeLanczosRgba(px, AMMO_ICON_BOX, cw, ch);
     for (let y = 0; y < ch; y++) {
       for (let x = 0; x < cw; x++) {
-        // nearest-neighbour crop of the source box
-        const sx = ax + Math.min(bx - ax - 1, Math.floor(x * (bx - ax) / cw));
-        const sy = ay + Math.min(by - ay - 1, Math.floor(y * (by - ay) / ch));
-        const o = (sy * px.width + sx) * 4;
-        const r = px.rgba[o], g = px.rgba[o + 1], b = px.rgba[o + 2], a = px.rgba[o + 3];
+        const o = (y * cw + x) * 4;
+        const r = scaled[o], g = scaled[o + 1], b = scaled[o + 2], a = scaled[o + 3];
         if (a < 128) continue;
         if (!alphaKeyed) {
           let bg = false;
