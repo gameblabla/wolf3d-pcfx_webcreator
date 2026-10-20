@@ -8,13 +8,17 @@
  *
  * with the lump offsets relative to the WAD start.  The artwork lumps are
  * compressed with a small LZ77 variant (see the decompressor below) and
- * unpack to an 8-byte header (width, height) followed by palette indices.
- * The colours live in the "RGBPALS" lump: 13 palettes of 256 RGB triples.
+ * unpack to an 8-byte header followed by palette indices: byte 2 holds the
+ * width, byte 3 the height, and the pixels start at offset 8.  The colours
+ * live in the "RGBPALS" lump -- 13 palettes of 256 RGB triples -- and the
+ * HUD art uses the first one.
+ *
+ * Every lump name carries a flag: the top bit of the first character is
+ * set, so the face artwork is stored as 0xC6 "ACE1" and its real name is
+ * "FACE1".  The bit has to be cleared before the name means anything.
  */
 
-import { u16le, u32le, str, cat } from './core.js';
-
-const MAGIC = 'WPCFXBASE1';
+import { u32le, str } from './core.js';
 
 /* ------------------------------------------------------------------- LZ77 */
 
@@ -53,6 +57,13 @@ export function lz77Decompress(src) {
 
 /* ---------------------------------------------------------------- the ROM */
 
+/* The name of a lump with the flag bit cleared: the cartridge sets the top
+ * bit of the first character of every name. */
+function lumpName(raw) {
+  if (!raw.length) return raw;
+  return String.fromCharCode(raw.charCodeAt(0) & 0x7f) + raw.slice(1);
+}
+
 export class JaguarROM {
   constructor(bytes) {
     this.data = bytes;
@@ -66,16 +77,11 @@ export class JaguarROM {
       const p = this.dirOffset + i * 16;
       const o = u32le(bytes, p);
       const l = u32le(bytes, p + 4);
-      const name = str(bytes, p + 8, 8);
-      this.entries.push({ name, offset: o, length: l });
+      this.entries.push({ name: lumpName(str(bytes, p + 8, 8)), offset: o, length: l });
     }
     this.byName = new Map();
     for (const e of this.entries) {
       if (!this.byName.has(e.name)) this.byName.set(e.name, e);
-      if (e.name.length && !/[A-Za-z0-9_]/.test(e.name[0])) {
-        const alt = e.name.slice(1);
-        if (!this.byName.has(alt)) this.byName.set(alt, e);
-      }
     }
   }
 
@@ -105,7 +111,7 @@ export class JaguarROM {
                              this.wadOffset + e.offset + this.storedSize(e));
   }
 
-  /* An artwork lump -> {width, height, pixels}. */
+  /* An artwork lump -> {w, h, px}. */
   art(name) {
     const dec = lz77Decompress(this.lumpBytes(name));
     const w = dec[2];
@@ -126,28 +132,63 @@ export class JaguarROM {
 
 /* ------------------------------------------------------------- HUD sheet */
 
-/* Which ROM lump ends up in which face cell, and where inside the cell its
- * top left corner sits.  Derived by matching the ROM artwork against the
- * reference sheet; the shapes line up exactly (744/744 pixels) for the
- * cells the Jaguar draws 1:1. */
-const FACE_MAP = {
-  0: ['ACE3', 1, 0], 1: ['ACE5', 2, 0], 2: ['ACE7', 2, 0], 3: ['ACEL1', 2, 0],
-  4: ['ACER1', 0, 0], 5: ['ACE6', 1, 0], 6: ['ACE8', 2, 0], 7: ['ACE4', 2, 0],
-  8: ['ACEL2', 2, 0], 9: ['ACER2', 0, 0], 10: ['ACE9', 1, 0], 11: ['ACE1', 2, 0],
-  12: ['ACE10', 2, 0], 13: ['ACEL3', 1, 0], 14: ['ACER3', 0, 0], 15: ['ACE12', 1, 0],
-  16: ['ACE11', 2, 0], 17: ['ACE13', 2, 0], 18: ['ACEL4', 1, 0], 19: ['ACER4', 0, 0],
-  20: ['ACE15', 1, 0], 21: ['ACE18', 2, 0], 22: ['ACE16', 2, 0], 23: ['ACEL5', 1, 0],
-  24: ['ACER5', 0, 0], 25: ['ACE19', 1, 0], 26: ['ACE20', 2, 0], 27: ['ACE2', 2, 0],
-  28: ['ACEL6', 1, 0], 29: ['ACER6', 0, 0], 30: ['ACE21', 1, 0], 31: ['ACE23', 2, 0],
-  32: ['ACE22', 2, 0], 33: [null, 0, 0], 34: [null, 0, 0],
-  35: ['ACE24', 1, 0], 36: ['ACE17', 2, 2], 37: [null, 0, 0],
-  38: ['ACE25', 2, 2], 39: ['ACE14', 2, 2],
-};
-const DIGIT_CELLS = [[30, 341], [48, 341], [64, 341], [81, 341], [98, 341],
-                     [29, 358], [47, 358], [64, 358], [81, 358], [98, 358]];
-const DIGIT_LUMPS = Array.from({ length: 10 }, (_, i) => 'UM' + i);
-const DIGIT_OFFSET = [0, 1];
-const ICON_LUMPS = ['LANK', 'KEY', 'MMO1', 'MMO2', 'MMO3'];
+/* Where every piece of the HUD artwork sits in the sheet the Jaguar draws.
+ *
+ * The sheet is 199x376: the three status icons along the top, the BJ face
+ * grid under them and the status digits along the bottom.  The positions
+ * come from the reference rip of the sheet (assets/jaguar/HUD.png); every
+ * piece placed here matches that rip pixel for pixel, colours included --
+ * the rip and the cartridge hold the same artwork.
+ *
+ * The two words the rip shows under the icons ("Ammo" and "Keys") are not
+ * bitmaps: the Jaguar draws them with its own font at run time, so there
+ * is nothing to lift out of the cartridge for them.
+ */
+
+/* The face grid: three idle frames and the two profiles, six rows of them
+ * as BJ's health drops.  The near-death row and the two special faces
+ * (the grin and the corpse) sit below the grid. */
+const FACE_GRID = [];
+for (let row = 0; row < 6; row++) {
+  const y = 77 + 33 * row;
+  FACE_GRID.push(
+    { kind: 'face', lump: 'FACE' + (3 + 3 * row), x: 2, y },
+    { kind: 'face', lump: 'FACE' + (4 + 3 * row), x: 35, y },
+    { kind: 'face', lump: 'FACE' + (5 + 3 * row), x: 68, y },
+    { kind: 'face', lump: 'FACEL' + (row + 1), x: row < 2 ? 101 : 100, y },
+    { kind: 'face', lump: 'FACER' + (row + 1), x: 134, y });
+}
+
+const SHEET_LAYOUT = [
+  /* the three status icons along the top of the sheet */
+  { kind: 'icon', lump: 'AMMO1', x: 1, y: 1 },      // the ammo cartridge
+  { kind: 'icon', lump: 'AMMO2', x: 34, y: 1 },     // the key card
+  { kind: 'icon', lump: 'AMMO3', x: 67, y: 1 },     // the difficulty figure
+
+  /* the row above the grid: the face the HUD opens on and two frames */
+  { kind: 'face', lump: 'FIRSTFAC', x: 2, y: 44 },
+  { kind: 'face', lump: 'FACE1', x: 35, y: 44 },
+  { kind: 'face', lump: 'FACE2', x: 68, y: 44 },
+
+  ...FACE_GRID,
+
+  /* the near-death row */
+  { kind: 'face', lump: 'FACE21', x: 2, y: 275 },
+  { kind: 'face', lump: 'FACE22', x: 35, y: 275 },
+  { kind: 'face', lump: 'FACE23', x: 68, y: 275 },
+
+  /* the grin and the corpse */
+  { kind: 'face', lump: 'FACE24', x: 2, y: 308 },
+  { kind: 'face', lump: 'FACE25', x: 35, y: 311 },
+];
+
+/* The status digits: 0-4 on the upper row, 5-9 on the lower one. */
+for (let i = 0; i < 5; i++) {
+  SHEET_LAYOUT.push({ kind: 'digit', lump: 'NUM' + i, x: 30 + 17 * i, y: 342 });
+}
+for (let i = 0; i < 5; i++) {
+  SHEET_LAYOUT.push({ kind: 'digit', lump: 'NUM' + (i + 5), x: 30 + 17 * i, y: 359 });
+}
 
 function blitIndexed(dst, dw, dh, src, sw, sh, x0, y0, pal) {
   for (let y = 0; y < sh; y++) {
@@ -167,63 +208,22 @@ function blitIndexed(dst, dw, dh, src, sw, sh, x0, y0, pal) {
   }
 }
 
-function findIconPos(canvas, dw, dh, pix, w, h) {
-  let best = null;
-  const ymax = Math.min(dh - h, 56);
-  const xmax = dw - w;
-  for (let y0 = 0; y0 <= ymax; y0++) {
-    for (let x0 = 0; x0 <= xmax; x0++) {
-      let same = 0, tot = 0;
-      for (let y = 0; y < h; y += 2) {
-        for (let x = 0; x < w; x += 2) {
-          const o = ((y0 + y) * dw + (x0 + x)) * 4;
-          const opaque = canvas[o + 3] !== 0;
-          same += (opaque === (pix[y * w + x] !== 0)) ? 1 : 0;
-          tot++;
-        }
-      }
-      if (tot && (best === null || same > best[0])) best = [same, tot, x0, y0];
-    }
-  }
-  if (best && best[0] >= best[1] * 0.85) return [best[2], best[3]];
-  return null;
-}
-
 /* Rebuild the HUD sheet (an RGBA image) from the cartridge image. */
 export function buildHudSheet(rom, sheetSize = [199, 376]) {
   const pal = rom.palette(0);
   const [dw, dh] = sheetSize;
   const canvas = new Uint8Array(dw * dh * 4);
-  let faces = 0, digits = 0, icons = 0;
+  const counts = { face: 0, digit: 0, icon: 0 };
 
-  for (const cell of Object.keys(FACE_MAP).map(Number).sort((a, b) => a - b)) {
-    const [lump, ox, oy] = FACE_MAP[cell];
-    if (!lump) continue;
+  for (const item of SHEET_LAYOUT) {
     let art;
-    try { art = rom.art(lump); } catch (e) { continue; }
-    const r = Math.floor(cell / 5), c = cell % 5;
-    blitIndexed(canvas, dw, dh, art.px, art.w, art.h,
-               FACE_COLS[c][0] + ox, FACE_ROWS[r][0] + oy, pal);
-    faces++;
+    try { art = rom.art(item.lump); } catch (e) { continue; }
+    if (!art.w || !art.h) continue;
+    blitIndexed(canvas, dw, dh, art.px, art.w, art.h, item.x, item.y, pal);
+    counts[item.kind]++;
   }
-  for (let i = 0; i < DIGIT_LUMPS.length; i++) {
-    let art;
-    try { art = rom.art(DIGIT_LUMPS[i]); } catch (e) { continue; }
-    const [x0, y0] = DIGIT_CELLS[i];
-    blitIndexed(canvas, dw, dh, art.px, art.w, art.h,
-               x0 + DIGIT_OFFSET[0], y0 + DIGIT_OFFSET[1], pal);
-    digits++;
-  }
-  for (const lump of ICON_LUMPS) {
-    let art;
-    try { art = rom.art(lump); } catch (e) { continue; }
-    const pos = findIconPos(canvas, dw, dh, art.px, art.w, art.h);
-    if (pos) {
-      blitIndexed(canvas, dw, dh, art.px, art.w, art.h, pos[0], pos[1], pal);
-      icons++;
-    }
-  }
-  return { width: dw, height: dh, rgba: canvas, faces, digits, icons };
+  return { width: dw, height: dh, rgba: canvas,
+           faces: counts.face, digits: counts.digit, icons: counts.icon };
 }
 
 /* Where the HUD sheet puts each face (see tools/wolf_jag_hud.py). */
@@ -236,14 +236,16 @@ const DIGIT_COLS_A = [[30, 46], [48, 62], [64, 79], [80, 95], [98, 114]];
 const DIGIT_COLS_B = [[29, 45], [47, 63], [64, 79], [81, 97], [98, 114]];
 const DIGIT_W = 16, DIGIT_H = 18;
 const FACE_W = 24, FACE_H = 32;
+/* The ammo cartridge, in the sheet: the bullet inside the AMMO1 icon. */
 const AMMO_ICON_BOX = [9, 10, 16, 26];
 const AMMO_ICON_W = 11, AMMO_ICON_H = 26;
 
 /* The gfxv_wl6.h chunk numbers the HUD draws. */
 export const CHUNK = {
-  KNIFEPIC: 91, PISTOLPIC: 92, GATLINGGUNPIC: 93, N_0PIC: 95,
-  FACE1APIC: 109, GOTGATLINGPIC: 131, MUTANTBJPIC: 132, FACE8APIC: 130,
-  GUNPIC: 92, N_BLANKPIC: 99,
+  KNIFEPIC: 91, GUNPIC: 92, MACHINEGUNPIC: 93, GATLINGGUNPIC: 94,
+  NOKEYPIC: 95, GOLDKEYPIC: 96, SILVERKEYPIC: 97,
+  N_BLANKPIC: 98, N_0PIC: 99,
+  FACE1APIC: 109, FACE8APIC: 130, GOTGATLINGPIC: 131, MUTANTBJPIC: 132,
 };
 
 const BACKDROP = [[125, 146, 158], [102, 119, 129], [99, 116, 125]];
@@ -329,7 +331,7 @@ function extractIndexed(px, box, canvasW, canvasH, quant, alphaKeyed, valign = '
 }
 
 /* Build the HUD overrides: {chunk: {w, h, px}} from the cartridge's HUD
- * sheet.  `sheet` is the decoded PNG ({width, height, rgba}). */
+ * sheet.  `sheet` is the decoded sheet ({width, height, rgba}). */
 export function buildHudOverrides(sheet, pal) {
   const quant = makeQuantizer(pal);
   let alphaKeyed = false;
@@ -376,7 +378,11 @@ export function buildHudOverrides(sheet, pal) {
   }
   // the blank digit
   ov[CHUNK.N_BLANKPIC] = { w: DIGIT_W * 2, h: DIGIT_H, px: new Uint8Array(DIGIT_W * 2 * DIGIT_H) };
-  // the ammo bullet icon (repurposes the never-drawn GUNPIC chunk)
+  // the ammo bullet icon (repurposes the never-drawn GUNPIC chunk): the
+  // cartridge that sits at the top of the sheet, scaled up for the HUD tile.
+  // The port's own Python build scales the same pixels with PIL's LANCZOS;
+  // this one keeps them as they are (nearest neighbour), which needs no
+  // image library and does not depend on the Pillow version in use.
   {
     const [ax, ay, bx, by] = AMMO_ICON_BOX;
     const cw = AMMO_ICON_W, ch = AMMO_ICON_H;
