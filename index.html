@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wolfenstein 3D &mdash; NEC PC-FX disc builder</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">W3D</span>
+    <div>
+      <h1>Wolfenstein 3D<span class="wide-only"> &mdash; NEC PC-FX disc builder</span></h1>
+      <p class="sub">Unpack the game data, decode the 3DO soundtrack, pull the HUD
+        out of the Jaguar cartridge, patch it all into the stripped base image.</p>
+    </div>
+  </div>
+  <div class="chips">
+    <span class="chip" id="chip-base">base image&hellip;</span>
+    <span class="chip" id="chip-toolchain">browser only</span>
+  </div>
+</header>
+
+<div id="serve-warning" hidden>
+  <b>This page has to be served over HTTP.</b>
+  Browsers refuse to load JavaScript modules or fetch the base image for a page
+  opened straight off the disk, so nothing on it will work from
+  <code>file://</code>. Serve the folder instead &mdash; from the
+  <code>webeditor</code> directory run
+  <code>python3 -m http.server 8765</code> (or any static file server) and open
+  <code>http://127.0.0.1:8765/</code>.
+</div>
+
+<main>
+  <section class="col left">
+    <h2>1 &middot; Inputs</h2>
+
+    <article class="card" id="card-wl6">
+      <div class="card-head">
+        <h3>Wolfenstein 3D data</h3>
+        <span class="badge required">required</span>
+      </div>
+      <p class="hint">The <b>retail</b> (full) v1.4 <code>.WL6</code> set from the GOG
+        release, in a zip.</p>
+      <div class="drop">
+        <input type="file" id="f-wl6" accept=".zip" hidden>
+        <span class="drop-icon">&#8681;</span>
+        <span class="drop-text">drop the <b>.WL6 zip</b> here</span>
+        <span class="drop-sub" data-role="status">nothing selected</span>
+      </div>
+      <button type="button" class="upload" data-pick="f-wl6">Upload the .WL6 zip&hellip;</button>
+    </article>
+
+    <article class="card" id="card-iso">
+      <div class="card-head">
+        <h3>Wolfenstein 3D (3DO) disc image</h3>
+        <span class="badge required">required</span>
+      </div>
+      <p class="hint">The soundtrack (9 CD-DA tracks) and the 42 sound effects.</p>
+      <div class="drop">
+        <input type="file" id="f-iso" accept=".bin,.iso" hidden>
+        <span class="drop-icon">&#8681;</span>
+        <span class="drop-text">drop the 3DO <b>.bin / .iso</b> here</span>
+        <span class="drop-sub" data-role="status">nothing selected</span>
+      </div>
+      <button type="button" class="upload" data-pick="f-iso">Upload the 3DO image&hellip;</button>
+    </article>
+
+    <article class="card" id="card-j64">
+      <div class="card-head">
+        <h3>Atari Jaguar cartridge</h3>
+        <span class="badge required">required</span>
+      </div>
+      <p class="hint">The Jaguar port re-drew the HUD; it is rebuilt from the ROM's
+        own WAD.</p>
+      <div class="drop">
+        <input type="file" id="f-j64" accept=".j64,.jag,.rom" hidden>
+        <span class="drop-icon">&#8681;</span>
+        <span class="drop-text">drop the Jaguar <b>.j64</b> here</span>
+        <span class="drop-sub" data-role="status">nothing selected</span>
+      </div>
+      <button type="button" class="upload" data-pick="f-j64">Upload the Jaguar .j64&hellip;</button>
+    </article>
+
+    <article class="card build">
+      <div class="build-row">
+        <button id="btn-build" class="primary">Build the disc</button>
+        <span class="build-hint" id="build-status">ready</span>
+      </div>
+      <div class="log" id="log"><div class="log-empty">the build log shows up here</div></div>
+    </article>
+  </section>
+
+  <section class="col right">
+    <h2>How it works</h2>
+    <article class="card">
+      <p class="hint">The port ships one binary: <code>wolf_pcfx_base.bin</code>, the
+        finished disc with every piece of id Software's data taken out &mdash; the
+        boot pack (the font, the menu art, the HUD), the map packs (every level's
+        geometry, textures and sprites) and the sound bank. The ROM code, the
+        title screen and the palette stay, because the game needs them.</p>
+      <p class="hint">This page takes your own copies of the game data, regenerates
+        those three resources and writes them back into the base image at the
+        offsets its manifest records. The result is a bootable disc: the
+        <code>wolf_pcfx.bin</code> data track, the cue sheet and the CD-DA tracks,
+        zipped up and downloaded.</p>
+      <p class="hint">The build finishes with the CRC32 of the finished image, so
+        you can check the download against the number shown here.</p>
+      <p class="hint">Only the <b>retail</b> data set works. The shareware's
+        <code>.WL6</code> files are a different set (a different picture count, a
+        different VSWAP) and the port's tables are the retail's, so a shareware
+        build comes out mis-indexed; the page says so if it spots one.</p>
+      <p class="hint">No server, no build step, no toolchain: it is all JavaScript
+        in this page.</p>
+    </article>
+  </section>
+</main>
+
+<footer>
+  <span>wolf-pcfx web editor &mdash; the whole build runs client side.</span>
+</footer>
+
+<script>
+// A classic script, so this check runs even when the modules cannot load.
+if (location.protocol === 'file:') {
+  document.getElementById('serve-warning').hidden = false;
+}
+</script>
+<!-- The modules are fetched as text and imported from blob URLs.  A server
+     that types .js as application/json (or anything else that is not a
+     JavaScript type) would otherwise refuse to load them, and a browser
+     refuses to load ES modules from a file:// page at all - both problems
+     vanish this way, since fetch() does not care about the MIME type and a
+     blob URL is always text/javascript. -->
+<script>
+(function () {
+  var blobs = new Map();
+
+  function blobFor(spec, base) {
+    var url = new URL(spec, base).href;
+    if (blobs.has(url)) return Promise.resolve(blobs.get(url));
+    return fetch(url).then(function (res) {
+      if (!res.ok) throw new Error('cannot load ' + url + ' (' + res.status + ')');
+      return res.text();
+    }).then(function (src) {
+      // pull in the dependencies first, then point the imports at them
+      var deps = Array.from(src.matchAll(/from\s+['"]([^'"]+)['"]/g), function (m) { return m[1]; });
+      return Promise.all(deps.map(function (d) {
+        return blobFor(d, url).then(function (b) { return [d, b]; });
+      })).then(function (pairs) {
+        var map = new Map(pairs);
+        src = src.replace(/from\s+(['"])([^'"]+)\1/g, function (m, q, s) {
+          return 'from ' + q + map.get(s) + q;
+        });
+        var blobUrl = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+        blobs.set(url, blobUrl);
+        return blobUrl;
+      });
+    });
+  }
+
+  function fail(err) {
+    var box = document.getElementById('log');
+    if (!box) return;
+    box.innerHTML = '';
+    var line = document.createElement('div');
+    line.className = 'err';
+    line.textContent = 'ERROR: ' + (err && err.message ? err.message : err);
+    box.appendChild(line);
+    var status = document.getElementById('build-status');
+    if (status) status.textContent = 'failed to start';
+  }
+
+  blobFor('./app.js', location.href)
+    .then(function (url) { return import(url); })
+    .catch(fail);
+})();
+</script>
+</body>
+</html>
