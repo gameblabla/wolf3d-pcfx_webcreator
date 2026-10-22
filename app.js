@@ -18,6 +18,7 @@ import { buildBootpack, buildMappacks, findSafeBlackTwin, NUMCHUNKS, NUMPICS }
 import { buildSfxBank } from './js/sfx.js';
 import { readManifest, paletteFromImage, patchSlots } from './js/baseimg.js';
 import { applyFpsPatch } from './js/fpspatch.js';
+import { validateDiscLayout } from './js/disclayout.js';
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
@@ -179,36 +180,29 @@ async function build() {
     status('converting the soundtrack...');
     const entries = [];
     const t01 = await fetch('TRACK1.wav').catch(() => null);
-    let hasT01 = false;
-    if (t01 && t01.ok) {
-      const wav = readWAV(new Uint8Array(await t01.arrayBuffer()));
-      const cd = wavToCDBin(wav, 0);
-      entries.push({ name: 'wolf_pcfx_t01.bin', data: cd.data });
-      hasT01 = true;
+    if (!t01 || !t01.ok) {
+      throw new Error('TRACK1.wav is required: this base image needs audio track 01 before the data track');
     }
+    const leadWav = readWAV(new Uint8Array(await t01.arrayBuffer()));
+    const leadTrack = wavToCDBin(leadWav, 0);
+    validateDiscLayout(image, manifest, leadTrack.sectors);
+    entries.push({ name: 'wolf_pcfx_t01.bin', data: leadTrack.data });
     const trackNames = [];
     for (let i = 0; i < songs.length; i++) {
       const wav = readWAV(songs[i].data);
-      const cd = wavToCDBin(wav, (hasT01 && i === 0) ? DATA_PREGAP_SECTORS : 0);
+      const cd = wavToCDBin(wav, i === 0 ? DATA_PREGAP_SECTORS : 0);
       const name = 'wolf_pcfx_' + songs[i].name.replace('.wav', '').toUpperCase() + '.bin';
       entries.push({ name, data: cd.data });
       trackNames.push(name);
     }
 
-    let cue = '';
-    let num;
-    if (hasT01) {
-      cue += 'FILE "wolf_pcfx_t01.bin" BINARY\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n';
-      cue += 'FILE "wolf_pcfx.bin" BINARY\n  TRACK 02 MODE1/2048\n' +
-             '    INDEX 00 00:00:00\n    INDEX 01 00:02:00\n';
-      num = 3;
-    } else {
-      cue += 'FILE "wolf_pcfx.bin" BINARY\n  TRACK 01 MODE1/2048\n    INDEX 01 00:00:00\n';
-      num = 2;
-    }
+    let cue = 'FILE "wolf_pcfx_t01.bin" BINARY\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n' +
+      'FILE "wolf_pcfx.bin" BINARY\n  TRACK 02 MODE1/2048\n' +
+      '    INDEX 00 00:00:00\n    INDEX 01 00:02:00\n';
+    let num = 3;
     for (const name of trackNames) {
       cue += 'FILE "' + name + '" BINARY\n  TRACK ' + String(num).padStart(2, '0') + ' AUDIO\n';
-      if (hasT01 && num === 3) cue += '    INDEX 00 00:00:00\n    INDEX 01 00:02:00\n';
+      if (num === 3) cue += '    INDEX 00 00:00:00\n    INDEX 01 00:02:00\n';
       else cue += '    INDEX 01 00:00:00\n';
       num++;
     }
