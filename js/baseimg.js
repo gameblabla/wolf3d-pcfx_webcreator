@@ -54,18 +54,38 @@ export function paletteFromImage(image, manifest) {
   return pal;
 }
 
-/* Write the resources back into the base image.  Every slot in the
- * manifest must be supplied and must fit: the disc layout (the LBAs the
- * ROM's boot header carries) is fixed, so a resource that outgrows its
- * slot would collide with the next one. */
+/* The manifest records the reference blob's byte count, whereas disc
+ * resources occupy whole 2048-byte sectors. Allow rebuilt art to use the
+ * final sector's zero padding, without moving any of the fixed LBAs.
+ * Check the original image and all recorded regions before using padding. */
+function slotCapacity(image, manifest, slot) {
+  const end = slot.offset + slot.size;
+  if (slot.source !== 'disc' || slot.offset % 2048 !== 0) return slot.size;
+  let limit = Math.min(Math.ceil(end / 2048) * 2048, image.length);
+  for (const region of [...manifest.slots, ...(manifest.keep || []),
+                        { offset: MANIFEST_OFFSET, size: MANIFEST_MAX }]) {
+    if (region === slot) continue;
+    if (region.offset < limit && region.offset + region.size > end) {
+      limit = Math.min(limit, Math.max(end, region.offset));
+    }
+  }
+  for (let p = end; p < limit; p++) {
+    if (image[p] !== 0) return p - slot.offset;
+  }
+  return limit - slot.offset;
+}
+
+/* Write resources into their fixed disc slots, including verified sector
+ * padding. Larger resources still fail instead of colliding with data. */
 export function patchSlots(image, manifest, blobs) {
   const out = new Uint8Array(image);
   for (const slot of manifest.slots) {
     const data = blobs[slot.name];
     if (!data) throw new Error('no data for the ' + slot.name + ' slot');
-    if (data.length > slot.size) {
+    const capacity = slotCapacity(image, manifest, slot);
+    if (data.length > capacity) {
       throw new Error('the ' + slot.name + ' data is ' + data.length +
-                      ' bytes, the base image only has room for ' + slot.size);
+                      ' bytes, the base image only has room for ' + capacity);
     }
     out.set(data, slot.offset);
   }
