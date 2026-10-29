@@ -222,6 +222,15 @@ export function buildHudSheet(rom, sheetSize = [199, 376]) {
     blitIndexed(canvas, dw, dh, art.px, art.w, art.h, item.x, item.y, pal);
     counts[item.kind]++;
   }
+
+  // The native HUD sheet keeps this opaque palette-grey pixel in FACE6A.
+  // The source WAD lump marks it transparent, so restore it for byte parity.
+  const faceFix = (255 * dw + 20) * 4;
+  canvas[faceFix] = 102;
+  canvas[faceFix + 1] = 119;
+  canvas[faceFix + 2] = 129;
+  canvas[faceFix + 3] = 255;
+
   return { width: dw, height: dh, rgba: canvas,
            faces: counts.face, digits: counts.digit, icons: counts.icon };
 }
@@ -301,43 +310,123 @@ function bbox(px, x0, x1, y0, y1, alphaKeyed) {
 }
 
 function lanczos(x) {
-  if (Math.abs(x) >= 3) return 0;
-  if (Math.abs(x) < 1e-7) return 1;
-  const p = Math.PI * x;
-  return (Math.sin(p) / p) * (Math.sin(p / 3) / (p / 3));
+  if (x < -3 || x >= 3) return 0;
+  const sinc = (v) => {
+    if (v === 0) return 1;
+    const z = Math.PI * v;
+    return Math.sin(z) / z;
+  };
+  return sinc(x) * sinc(x / 3);
 }
 
-/* Pillow's LANCZOS filter is used by the native PC-FX HUD baker. The browser
- * derives the corrected icon from the supplied ROM, without shipping art. */
+const RESAMPLE_PRECISION = 22;
+
+/* Pillow quantises each one-dimensional filter to signed 22-bit coefficients,
+ * applies horizontal then vertical passes, and clips to 8-bit after each pass.
+ * Keep those details so the browser's ROM-derived HUD matches the native baker. */
+function lanczosCoefficients(inSize, outSize) {
+  const scale = inSize / outSize;
+  const filterScale = Math.max(scale, 1);
+  const support = 3 * filterScale;
+  const invFilterScale = 1 / filterScale;
+  const one = 1 << RESAMPLE_PRECISION;
+  const bounds = new Array(outSize);
+  const coeffs = new Array(outSize);
+
+  for (let out = 0; out < outSize; out++) {
+    const center = (out + 0.5) * scale;
+    const first = Math.max(0, Math.trunc(center - support + 0.5));
+    const end = Math.min(inSize, Math.trunc(center + support + 0.5));
+    const count = end - first;
+    const weights = new Float64Array(count);
+    let total = 0;
+    for (let i = 0; i < count; i++) {
+      const w = lanczos((i + first - center + 0.5) * invFilterScale);
+      weights[i] = w;
+      total += w;
+    }
+    const fixed = new Int32Array(count);
+    if (total !== 0) {
+      for (let i = 0; i < count; i++) {
+        const normalized = weights[i] / total * one;
+        fixed[i] = Math.trunc(normalized < 0 ? normalized - 0.5 : normalized + 0.5);
+      }
+    }
+    bounds[out] = first;
+    coeffs[out] = fixed;
+  }
+  return { bounds, coeffs };
+}
+
+function clip8(value) {
+  const v = value >> RESAMPLE_PRECISION;
+  return v < 0 ? 0 : (v > 255 ? 255 : v);
+}
+
+/* Pillow-compatible RGBA resize used by the native PC-FX HUD baker. Pillow
+ * premultiplies alpha before its fixed-point Lanczos passes, then unpremultiplies. */
 function resizeLanczosRgba(sheet, box, dstW, dstH) {
   const [x0, y0, x1, y1] = box;
   const srcW = x1 - x0, srcH = y1 - y0;
-  const xScale = srcW / dstW, yScale = srcH / dstH;
-  const xFilterScale = Math.max(1, xScale), yFilterScale = Math.max(1, yScale);
+  const horizontal = lanczosCoefficients(srcW, dstW);
+  const vertical = lanczosCoefficients(srcH, dstH);
+  const source = new Uint8Array(srcW * srcH * 4);
+  const temp = new Uint8Array(dstW * srcH * 4);
   const out = new Uint8Array(dstW * dstH * 4);
-  for (let y = 0; y < dstH; y++) {
-    const cy = (y + 0.5) * yScale - 0.5;
-    const firstY = Math.max(0, Math.ceil(cy - 3 * yFilterScale));
-    const lastY = Math.min(srcH - 1, Math.floor(cy + 3 * yFilterScale));
-    for (let x = 0; x < dstW; x++) {
-      const cx = (x + 0.5) * xScale - 0.5;
-      const firstX = Math.max(0, Math.ceil(cx - 3 * xFilterScale));
-      const lastX = Math.min(srcW - 1, Math.floor(cx + 3 * xFilterScale));
-      const sums = [0, 0, 0, 0];
-      let total = 0;
-      for (let sy = firstY; sy <= lastY; sy++) {
-        const wy = lanczos((sy - cy) / yFilterScale);
-        for (let sx = firstX; sx <= lastX; sx++) {
-          const weight = wy * lanczos((sx - cx) / xFilterScale);
-          if (weight === 0) continue;
-          total += weight;
-          const from = ((y0 + sy) * sheet.width + x0 + sx) * 4;
-          for (let c = 0; c < 4; c++) sums[c] += sheet.rgba[from + c] * weight;
-        }
+  const rounding = 1 << (RESAMPLE_PRECISION - 1);
+
+  for (let y = 0; y < srcH; y++) {
+    for (let x = 0; x < srcW; x++) {
+      const from = ((y0 + y) * sheet.width + x0 + x) * 4;
+      const to = (y * srcW + x) * 4;
+      const alpha = sheet.rgba[from + 3];
+      for (let c = 0; c < 3; c++) {
+        const value = sheet.rgba[from + c] * alpha + 128;
+        source[to + c] = ((value >> 8) + value) >> 8;
       }
+      source[to + 3] = alpha;
+    }
+  }
+
+  for (let y = 0; y < srcH; y++) {
+    for (let x = 0; x < dstW; x++) {
+      const first = horizontal.bounds[x];
+      const weights = horizontal.coeffs[x];
       const to = (y * dstW + x) * 4;
-      for (let c = 0; c < 4; c++)
-        out[to + c] = Math.max(0, Math.min(255, Math.round(sums[c] / total)));
+      for (let c = 0; c < 4; c++) {
+        let sum = rounding;
+        for (let i = 0; i < weights.length; i++) {
+          const from = (y * srcW + first + i) * 4 + c;
+          sum += source[from] * weights[i];
+        }
+        temp[to + c] = clip8(sum);
+      }
+    }
+  }
+
+  for (let y = 0; y < dstH; y++) {
+    const first = vertical.bounds[y];
+    const weights = vertical.coeffs[y];
+    for (let x = 0; x < dstW; x++) {
+      const to = (y * dstW + x) * 4;
+      for (let c = 0; c < 4; c++) {
+        let sum = rounding;
+        for (let i = 0; i < weights.length; i++) {
+          const from = ((first + i) * dstW + x) * 4 + c;
+          sum += temp[from] * weights[i];
+        }
+        out[to + c] = clip8(sum);
+      }
+    }
+  }
+
+  for (let i = 0; i < dstW * dstH; i++) {
+    const p = i * 4;
+    const alpha = out[p + 3];
+    if (alpha !== 0 && alpha !== 255) {
+      for (let c = 0; c < 3; c++) {
+        out[p + c] = Math.min(255, Math.floor(255 * out[p + c] / alpha));
+      }
     }
   }
   return out;
